@@ -16,6 +16,8 @@ xcrun clang++ -arch x86_64 -fapple-kext -mkernel -nostdinc -I"$KHDR" \
 xcrun clang++ -arch x86_64 -fapple-kext -nostdlib -Xlinker -kext \
   "$HERE/MuxFix.o" -o "$OUT/Contents/MacOS/MuxFix" 2>/dev/null
 
+cp "$HERE/Info.plist" "$OUT/Contents/Info.plist"
+
 rm -rf "$OUT/Contents/_CodeSignature"
 codesign -f -s - "$OUT"
 codesign --verify "$OUT"

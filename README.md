@@ -1,4 +1,4 @@
-# MuxFix — keep "Switchable Graphics = Discrete" on macOS
+# MuxFix — keep "Switchable Graphics = Discrete" on Gigabyte laptops (macOS)
 
 A tiny kext for **Gigabyte** laptops with a display MUX switch that, under macOS, lose the
 **`Switchable Graphics device = Discrete`** setting on every restart.
@@ -35,38 +35,85 @@ WMBD (0, 0xE6, value)  ->  WXCM (0xD0, value)   // SystemIO 0x72/0x73
 WMBC (0, 0xE6, 0)      ->  RXCM (0xD0) & 0x7F   // read back
 ```
 
-The important part: **the value is consumed at POST**. One write = one Discrete boot.
-That is why neither a one-off write nor an ACPI SSDT is enough: it has to be written
-**during every macOS session**, and the next POST applies it.
+Two details matter:
 
-macOS never writes it, so after a restart the panel falls back to the iGPU.
+1. **The value is consumed at POST.** One write = one Discrete boot. It has to be written
+   during *every* macOS session; the next POST applies it.
+2. macOS never writes it, so after a restart the panel falls back to the iGPU.
 
 ## How it works
 
-`MuxFix.kext` writes `0xD0 = 0x01` from its module start routine. A `LaunchDaemon` loads the
-kext on every boot, so the next boot comes up in Discrete.
+```
+OpenCore injects MuxFix.kext into the boot kernel collection
+        ↓
+com.lumi.muxfix (LaunchDaemon) asks the kernel to start it
+        ↓
+MuxFix_start() writes 0xD0 = 0x01
+        ↓
+next POST → panel on the dGPU
+```
 
-- No IOKit dependency: no classes, no matching. Only `IOLog`.
-- Builds with the **Command Line Tools** alone (`src/build.sh`).
-- Writes nothing if the value is already `1`.
+The kext has no IOKit dependency (no classes, no matching), only `IOLog`.
+
+### Why the LaunchDaemon is needed (and why the kext also goes in `/Library/Extensions`)
+
+macOS 26 ships with `spctl kext-consent` **disabled**, so a kext in `/Library/Extensions` is
+only accepted if it is signed with a **Developer ID Team ID**. An ad-hoc signature is blocked:
+
+```
+Kernel extension not signed with valid team ID
+Kernel Extension BLOCKED
+```
+
+But a kext injected by OpenCore lands in the **boot kernel collection** without any approval.
+The catch: the kernel does not start it on its own, so something has to ask for it. And here
+is the quirk that makes the whole thing work:
+
+- `kmutil load -b com.lumi.MuxFix` → goes through the approval path → blocked.
+- `kmutil load -p /Library/Extensions/MuxFix.kext` → resolves to the copy **already in the
+  kernel collection** → starts it, no approval.
+
+So the `/Library/Extensions` copy is only there to give `kmutil` a path. The binary that runs
+is the one OpenCore injected.
 
 ## Install
 
-```sh
-git clone <this repo> && cd muxfix
-bash src/build.sh          # builds src/MuxFix.kext
-sudo bash install.sh       # copies the kext, installs the daemon, loads it
-```
+1. **Build** (Command Line Tools are enough):
 
-If macOS asks in **System Settings → Privacy & Security**, approve the extension and restart.
+   ```sh
+   bash src/build.sh          # -> src/MuxFix.kext
+   ```
 
-The first boot after installing still starts in MSHybrid; the one after that is Discrete.
+2. **Put the kext in your EFI**: copy `src/MuxFix.kext` to `EFI/OC/Kexts/MuxFix.kext` and add
+   an entry to `Kernel → Add`:
+
+   ```
+   Arch           x86_64
+   BundlePath     MuxFix.kext
+   Comment        MuxFix: keep Switchable Graphics = Discrete
+   Enabled        true
+   ExecutablePath Contents/MacOS/MuxFix
+   MaxKernel      (empty)
+   MinKernel      (empty)
+   PlistPath      Contents/Info.plist
+   ```
+
+3. **Install the daemon and the path copy**:
+
+   ```sh
+   sudo bash install.sh
+   ```
+
+4. Restart. The first boot after installing may still come up in MSHybrid; the next one is
+   Discrete and it stays that way.
 
 ## Uninstall
 
 ```sh
-sudo bash uninstall.sh
+sudo bash uninstall.sh      # removes the daemon and the /Library/Extensions copy
 ```
+
+Then remove `MuxFix.kext` from `EFI/OC/Kexts` and from `Kernel → Add`.
 
 ## How it was found
 
@@ -77,19 +124,21 @@ sudo bash uninstall.sh
 2. That WMI method's `WmiMethodId` qualifier is **`0xE6`**, which in the DSDT is the
    `WMBD`/`WMBC` case that talks to ports `0x72/0x73`.
 3. Reading it from Linux with `acpi_call`: MSHybrid returns `0x0`, Discrete `0x1`.
-4. Writing `WMBD (0, 0xE6, 1)` from Linux made the next boot come up in Discrete — mechanism
-   confirmed.
+4. Writing `WMBD (0, 0xE6, 1)` from Linux made the next boot come up in Discrete —
+   mechanism confirmed.
 5. An ACPI-only attempt (SSDT calling the same method from `_INI`/`_STA`) has no effect under
-   macOS. A kext writing the ports directly does.
+   macOS; see `docs/`. A kext writing the ports directly does.
 
 ## Known limitations
 
 - Gigabyte-specific (probably the A16 / AORUS family with a manual MUX).
-- The setting is one boot deep: the kext must run in every session (the daemon handles it).
-- If you change the mode by hand in the BIOS or with the Windows app, MuxFix will put it back
-  to Discrete on the next boot. That is the point.
+- One boot deep: the kext must run in every session (the daemon handles it).
+- If you change the mode by hand in the BIOS or with the Windows app, MuxFix puts it back to
+  Discrete on the next boot. That is the point.
 - It does not replace the NVIDIA driver: you still need NullMoth (or similar) to accelerate
   the panel.
+- After a macOS update the kext keeps working as long as the EFI entry survives; if a tool
+  rewrites your EFI, re-add the kext.
 
 ## License
 
